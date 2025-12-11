@@ -72,32 +72,35 @@ async def interrupt_current_generation() -> str:
 async def get_server_logs(lines: int = 50) -> str:
     """
     📋 DIAGNOSE: Holt die letzten Zeilen der Server-Logs via SSH.
-    Zeigt Fehler, Fortschritt oder Abstürze an.
     """
-    # Wir lesen Standard-Output UND Fehler-Log von PM2 gleichzeitig
-    # Pfad ist meistens ~/.pm2/logs/...
     log_cmd = f"tail -n {lines} ~/.pm2/logs/{PM2_APP_NAME}-out.log ~/.pm2/logs/{PM2_APP_NAME}-error.log"
     
     ssh_cmd = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        f"{SSH_USER}@{SSH_HOST}",
-        log_cmd
+        "ssh", "-o", "BatchMode=yes",
+        f"{SSH_USER}@{SSH_HOST}", log_cmd
     ]
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            *ssh_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *ssh_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await proc.communicate()
 
         if proc.returncode == 0:
             logs = stdout.decode().strip()
-            if not logs:
-                return "⚠️ Logs sind leer oder Datei nicht gefunden. Prüfe den PM2-Namen!"
-            return f"📋 **Letzte Logs ({lines} Zeilen):**\n\n```log\n{logs}\n```"
+            # Hier ist der Trick für Open WebUI: HTML Details Tags!
+            # Wir "escapen" spitze Klammern, damit kein falsches HTML entsteht.
+            safe_logs = logs.replace("<", "&lt;").replace(">", "&gt;")
+            
+            return f"""
+<details>
+<summary>📋 <b>Klicke hier, um die Server-Logs zu sehen ({lines} Zeilen)</b></summary>
+<br>
+<pre><code>
+{safe_logs}
+</code></pre>
+</details>
+"""
         else:
             return f"❌ Fehler beim Log-Abruf: {stderr.decode().strip()}"
 
