@@ -153,67 +153,120 @@ class HttpExecutor(ComfyUIExecutor):
                         return result
             await asyncio.sleep(1.0)
 
-    async def execute_workflow(self, workflow_file: str, params: Dict[str, Any] = None) -> ExecuteResult:
-        """Execute workflow (HTTP way)"""
+
+    async def _is_task_active(self, prompt_id: str) -> bool:
+        """Prüft, ob ein Task noch existiert (Queue oder History)"""
         try:
-            if not os.path.exists(workflow_file):
-                logger.error(f"Workflow file does not exist: {workflow_file}")
-                return ExecuteResult(status="error", msg=f"Workflow file does not exist: {workflow_file}")
+            # 1. Prüfen ob ComfyUI überhaupt antwortet (Server Check)
+            # Wir nutzen hier system_stats für einen schnellen Ping
+            stats_url = f"{self.base_url}/system_stats"
+            async with self.get_comfyui_session() as session:
+                async with session.get(stats_url, timeout=2) as response:
+                    if response.status != 200:
+                        return False # Server ist wohl down/startet neu
+
+            # 2. Prüfen ob Task in der Queue ist (Running oder Pending)
+            queue_url = f"{self.base_url}/queue"
+            async with self.get_comfyui_session() as session:
+                async with session.get(queue_url) as response:
+                    if response.status == 200:
+                        queue_data = await response.json()
+                        # ComfyUI Queue Format: [ticket_id, prompt_id, ...]
+                        for task in queue_data.get("queue_running", []):
+                            if task[1] == prompt_id: return True
+                        for task in queue_data.get("queue_pending", []):
+                            if task[1] == prompt_id: return True
+
+            # 3. Prüfen ob Task in History ist (schon fertig?)
+            history_url = f"{self.base_url}/history/{prompt_id}"
+            async with self.get_comfyui_session() as session:
+                async with session.get(history_url) as response:
+                    if response.status == 200:
+                        hist = await response.json()
+                        if prompt_id in hist: return True
             
-            # Get workflow metadata
-            metadata = self.get_workflow_metadata(workflow_file)
-            if not metadata:
-                return ExecuteResult(status="error", msg="Cannot parse workflow metadata")
-            
-            # Load workflow JSON
-            with open(workflow_file, 'r', encoding='utf-8') as f:
-                workflow_data = json.load(f)
-            
-            if not workflow_data:
-                return ExecuteResult(status="error", msg="Workflow data is missing")
-            
-            # Use new parameter mapping logic
-            if params:
-                workflow_data = await self._apply_params_to_workflow(workflow_data, metadata, params)
-            else:
-                # Even if no parameters are passed, default values need to be applied
-                workflow_data = await self._apply_params_to_workflow(workflow_data, metadata, {})
-            
-            # Replace any seed == 0 with a random 63-bit seed before submission
-            workflow_data, _ = self._randomize_seed_in_workflow(workflow_data)
-            
-            # Extract output node information from metadata
-            output_id_2_var = self._extract_output_nodes(metadata)
-            
-            # Generate client ID
-            client_id = str(uuid.uuid4())
-            
-            # Prepare extra parameters
-            prompt_ext_params = {}
-            if COMFYUI_API_KEY:
-                prompt_ext_params = {
-                    "extra_data": {
-                        "api_key_comfy_org": COMFYUI_API_KEY
-                    }
-                }
-            else:
-                logger.warning("COMFYUI_API_KEY is not set")
-            
-            # Submit workflow to ComfyUI queue
-            try:
-                prompt_id = await self._queue_prompt(workflow_data, client_id, prompt_ext_params)
-            except Exception as e:
-                error_message = f"Submit workflow failed: [{type(e)}] {str(e)}"
-                logger.error(error_message)
-                return ExecuteResult(status="error", msg=error_message)
-            
-            # Wait for result
-            result = await self._wait_for_results(prompt_id, client_id, None, output_id_2_var)
-            
-            # Transfer result files
-            result = await self.transfer_result_files(result)
-            return result
-            
+            # Wenn er NIRGENDS ist, hat der Server ihn vergessen (Absturz/Neustart)
+            return False
         except Exception as e:
-            logger.error(f"Execute workflow failed: {str(e)}", exc_info=True)
-            return ExecuteResult(status="error", msg=str(e)) 
+            # Bei Netzwerkfehlern gehen wir davon aus, dass er down ist
+            return False
+
+    async def execute_workflow(self, workflow_file: str, params: Dict[str, Any] = None) -> ExecuteResult:
+        """Execute workflow mit Auto-Retry bei Server-Absturz"""
+        
+        # --- LADE WORKFLOW DATEN (Nur einmal am Anfang) ---
+        if not os.path.exists(workflow_file):
+            return ExecuteResult(status="error", msg=f"Workflow file missing")
+        
+        metadata = self.get_workflow_metadata(workflow_file)
+        if not metadata: return ExecuteResult(status="error", msg="Invalid metadata")
+
+        with open(workflow_file, 'r', encoding='utf-8') as f:
+            original_workflow_data = json.load(f)
+
+        # Parameter anwenden
+        workflow_data = await self._apply_params_to_workflow(original_workflow_data, metadata, params or {})
+        output_id_2_var = self._extract_output_nodes(metadata)
+        
+        # --- RETRY SCHLEIFE STARTET HIER ---
+        max_retries = 5  # Wie oft soll er es versuchen?
+        current_try = 0
+        
+        while current_try < max_retries:
+            current_try += 1
+            try:
+                # Seed neu würfeln bei jedem Versuch
+                workflow_to_send, _ = self._randomize_seed_in_workflow(copy.deepcopy(workflow_data))
+                
+                client_id = str(uuid.uuid4())
+                prompt_ext_params = {}
+                if COMFYUI_API_KEY:
+                    prompt_ext_params = {"extra_data": {"api_key_comfy_org": COMFYUI_API_KEY}}
+
+                # 1. Versuch: Senden
+                logger.info(f"Versuch {current_try}/{max_retries}: Sende Workflow an ComfyUI...")
+                try:
+                    prompt_id = await self._queue_prompt(workflow_to_send, client_id, prompt_ext_params)
+                except Exception as e:
+                    logger.warning(f"Konnte nicht senden (Server down?): {e}")
+                    await asyncio.sleep(5) # Warte 5s bevor wir es nochmal probieren
+                    continue 
+
+                # 2. Warten mit intelligenter Überwachung
+                # Wir bauen hier eine eigene Warteschleife statt _wait_for_results blind zu vertrauen
+                start_wait = time.time()
+                while True:
+                    # Timeout Schutz (z.B. 20 Minuten)
+                    if time.time() - start_wait > 1200:
+                        raise Exception("Global Timeout")
+
+                    # Prüfen: Ist der Task noch da?
+                    is_active = await self._is_task_active(prompt_id)
+                    
+                    if not is_active:
+                        # ALARM: Task ist weg! Server war wohl down.
+                        logger.warning(f"⚠️ Task {prompt_id} ist verschwunden! Server-Neustart vermutet. Starte Retry...")
+                        break # Bricht die innere Warte-Schleife ab -> springt zum nächsten 'while current_try' Loop
+                    
+                    # Prüfen: Ist er fertig? (Standard Check)
+                    try:
+                        # Hier rufen wir kurz die originale Logik auf, aber mit kurzem Timeout
+                        # Wir nutzen _wait_for_results mit 1 Sekunde Timeout nur zum Checken
+                        result = await self._wait_for_results(prompt_id, client_id, timeout=1, output_id_2_var=output_id_2_var)
+                        
+                        if result.status == "completed":
+                            # Erfolg! Dateien übertragen und raus hier.
+                            return await self.transfer_result_files(result)
+                        elif result.status == "error":
+                            return result # Echter Workflow Fehler, kein Retry
+                            
+                    except Exception:
+                        pass # Timeout bei wait_for_results ist okay, wir loopen ja selbst
+                    
+                    await asyncio.sleep(2) # Kurz warten vor nächstem Check
+
+            except Exception as e:
+                logger.error(f"Fehler im Versuch {current_try}: {e}")
+                await asyncio.sleep(2)
+        
+        return ExecuteResult(status="error", msg="Max retries exceeded")
