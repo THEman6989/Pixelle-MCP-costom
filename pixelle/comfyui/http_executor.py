@@ -191,6 +191,35 @@ class HttpExecutor(ComfyUIExecutor):
             # Bei Netzwerkfehlern gehen wir davon aus, dass er down ist
             return False
 
+
+    # Neue Hilfsmethode zum Lesen der letzten Logs
+    def _get_formatted_logs(self, lines=20) -> str:
+        try:
+            from pixelle.logger import LOG_FILE
+            if not os.path.exists(LOG_FILE):
+                return ""
+            
+            # Die letzten N Zeilen lesen
+            with open(LOG_FILE, 'r', encoding='utf-8') as f:
+                # Einfacher Trick für die letzten Zeilen bei kleinen Files
+                all_lines = f.readlines()
+                last_lines = all_lines[-lines:]
+            
+            log_content = "".join(last_lines).replace("<", "&lt;").replace(">", "&gt;")
+            
+            # HTML Details Tag für das "Aufklappen"
+            return f"""
+\n\n
+<details>
+<summary>🛠️ <b>Server-Konsole anzeigen (Letzte {lines} Zeilen)</b></summary>
+<pre><code>
+{log_content}
+</code></pre>
+</details>
+"""
+        except Exception as e:
+            return f"\n(Logs konnten nicht geladen werden: {e})"
+
     async def execute_workflow(self, workflow_file: str, params: Dict[str, Any] = None) -> ExecuteResult:
         """Execute workflow mit Auto-Retry bei Server-Absturz"""
         
@@ -252,7 +281,29 @@ class HttpExecutor(ComfyUIExecutor):
                     try:
                         # Hier rufen wir kurz die originale Logik auf, aber mit kurzem Timeout
                         # Wir nutzen _wait_for_results mit 1 Sekunde Timeout nur zum Checken
-                        result = await self._wait_for_results(prompt_id, client_id, timeout=1, output_id_2_var=output_id_2_var)
+                        if result.status == "completed":
+                            # 1. Dateien übertragen (URLs fixen)
+                            final_result = await self.transfer_result_files(result)
+                            
+                            # 2. Logs holen und anhängen (Dein neuer Code)
+                            try:
+                                # Wir nutzen die neue Hilfsfunktion (falls du sie _get_formatted_logs genannt hast)
+                                # Falls du die SSH-Variante nutzt, heißt sie vielleicht anders, 
+                                # aber hier gehen wir vom lokalen File-Read aus, den du vorhin wolltest.
+                                # Wenn du das SSH-Tool als separates Tool hast, brauchst du das hier eigentlich gar nicht!
+                                # Aber falls du die automatischen Logs willst:
+                                logs_html = self._get_formatted_logs(lines=30)
+                                
+                                # An die Text-Liste anhängen
+                                if final_result.texts:
+                                    final_result.texts.append(logs_html)
+                                else:
+                                    final_result.texts = [logs_html]
+                            except Exception:
+                                pass # Falls Logs scheitern, trotzdem Bild zurückgeben!
+
+                            # 3. Fertiges Ergebnis zurückgeben
+                            return final_result
                         
                         if result.status == "completed":
                             # Erfolg! Dateien übertragen und raus hier.
