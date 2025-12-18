@@ -82,8 +82,8 @@ After startup, it will automatically enter the **configuration wizard** to guide
 #### 📥 1. Get Source Code
 
 ```bash
-git clone https://github.com/AIDC-AI/Pixelle-MCP.git
-cd Pixelle-MCP
+git clone https://github.com/THEman6989/Pixelle-MCP-costom.git
+cd Pixelle-MCP-costom
 ```
 
 #### 🚀 2. Start Service
