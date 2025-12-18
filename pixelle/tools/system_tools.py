@@ -1,45 +1,64 @@
 import asyncio
 import aiohttp
+import shutil
 from pixelle.mcp_core import mcp
-from pixelle.settings import settings
+from pixelle.settings import settings  # Wir laden alles aus settings.py
 
-# --- 🔧 KONFIGURATION (BITTE AN DEINEN SERVER ANPASSEN!) ---
-SSH_USER = "root"               # Dein Benutzername auf dem ComfyUI-Server
-SSH_HOST = "192.168.1.XX"       # Die IP deines Servers (muss erreichbar sein)
-PM2_APP_NAME = "ComfyUI"        # Der exakte Name aus 'pm2 list' auf dem Server
+# --- 🔧 KONFIGURATION ---
+# Die Daten werden jetzt sicher aus der .env Datei oder settings.py geladen
+PM2_APP_NAME = "ComfyUI"
+# ------------------------
 
-# -----------------------------------------------------------
+def build_ssh_command(remote_command: str) -> list:
+    """
+    Erstellt den SSH-Befehl dynamisch basierend auf den Einstellungen.
+    """
+    # Daten aus Settings holen
+    host = settings.ssh_host
+    user = settings.ssh_user
+    password = settings.ssh_password
+
+    # Basis-SSH-Befehl
+    base_ssh = [
+        "ssh",
+        "-o", "BatchMode=no",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        f"{user}@{host}",
+        remote_command
+    ]
+
+    # Wenn ein Passwort in der .env steht und sshpass installiert ist:
+    if password and shutil.which("sshpass"):
+        return ["sshpass", "-p", password] + base_ssh
+    else:
+        # Fallback: Versucht Key-Based Auth
+        return base_ssh
+
 
 @mcp.tool()
 async def restart_comfyui_server() -> str:
     """
     💀 TERMINATOR: Startet den ComfyUI Server via SSH/PM2 komplett neu.
-    Nutze dies NUR, wenn der Server hängt oder nicht mehr reagiert.
-    Dies entspricht dem Ziehen des Steckers (Hard Reset).
+    Holt Host, User und Passwort sicher aus der Konfiguration.
     """
-    # Wir nutzen den nativen SSH-Client deines Laptops.
-    # BatchMode=yes verhindert, dass das Skript hängen bleibt, falls ein Passwort gefragt wird.
-    ssh_cmd = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        f"{SSH_USER}@{SSH_HOST}",
-        f"pm2 restart {PM2_APP_NAME}"
-    ]
+    remote_cmd = f"pm2 restart {PM2_APP_NAME}"
+    full_cmd = build_ssh_command(remote_cmd)
     
     try:
-        # Prozess starten
         proc = await asyncio.create_subprocess_exec(
-            *ssh_cmd,
+            *full_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await proc.communicate()
         
         if proc.returncode == 0:
-            return f"✅ **Terminator erfolgreich:** Prozess '{PM2_APP_NAME}' wurde neu gestartet."
+            return f"✅ **Terminator erfolgreich:** Prozess '{PM2_APP_NAME}' auf {settings.ssh_host} neu gestartet."
         else:
             error_msg = stderr.decode().strip()
-            return f"❌ **Fehler beim Neustart:**\nSSH meldet: {error_msg}\n(Stimmen User, IP und PM2-Name?)"
+            return (f"❌ **Fehler beim Neustart:**\nSSH meldet: {error_msg}\n"
+                    f"Hinweis: Prüfen Sie SSH_PASSWORD in der .env Datei.")
     except Exception as e:
         return f"❌ Kritischer Fehler beim Ausführen: {str(e)}"
 
@@ -48,24 +67,21 @@ async def restart_comfyui_server() -> str:
 async def interrupt_current_generation() -> str:
     """
     🛑 NOTBREMSE: Stoppt die aktuelle Generierung sanft über die API.
-    Der Server bleibt an, nur das aktuelle Bild wird abgebrochen.
-    Nutze dies, wenn du dich umentschieden hast.
     """
-    # URL aus den Settings laden (die aus deiner .env Datei)
-    base_url = (settings.comfyui_base_url or "http://127.0.0.1:8188").rstrip('/')
+    # Nutzt den Host aus den Settings oder Fallback auf localhost
+    host = settings.ssh_host if settings.ssh_host else "127.0.0.1"
+    base_url = (settings.comfyui_base_url or f"http://{host}:8188").rstrip('/')
     
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Interrupt senden (Stoppt die Rechnung)
             async with session.post(f"{base_url}/interrupt") as response:
                 if response.status == 200:
-                    # 2. Queue leeren (Damit nicht das nächste Bild direkt startet)
                     await session.post(f"{base_url}/queue", json={"clear": True})
                     return "🛑 **Abgebrochen:** Generierung gestoppt und Warteschlange geleert."
                 else:
-                    return f"⚠️ API-Fehler ({response.status}). Der Server reagiert komisch. Wenn er hängt, nutze 'restart_comfyui_server'."
+                    return f"⚠️ API-Fehler ({response.status}). Der Server reagiert komisch."
     except Exception as e:
-        return f"❌ Verbindung fehlgeschlagen. Der Server scheint tot zu sein. Nutze 'restart_comfyui_server'."
+        return f"❌ Verbindung zur API fehlgeschlagen ({base_url}). Nutze 'restart_comfyui_server'."
 
 
 @mcp.tool()
@@ -73,28 +89,21 @@ async def get_server_logs(lines: int = 50) -> str:
     """
     📋 DIAGNOSE: Holt die letzten Zeilen der Server-Logs via SSH.
     """
-    log_cmd = f"tail -n {lines} ~/.pm2/logs/{PM2_APP_NAME}-out.log ~/.pm2/logs/{PM2_APP_NAME}-error.log"
-    
-    ssh_cmd = [
-        "ssh", "-o", "BatchMode=yes",
-        f"{SSH_USER}@{SSH_HOST}", log_cmd
-    ]
+    remote_cmd = f"tail -n {lines} ~/.pm2/logs/{PM2_APP_NAME}-out.log ~/.pm2/logs/{PM2_APP_NAME}-error.log"
+    full_cmd = build_ssh_command(remote_cmd)
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            *ssh_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *full_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await proc.communicate()
 
         if proc.returncode == 0:
             logs = stdout.decode().strip()
-            # Hier ist der Trick für Open WebUI: HTML Details Tags!
-            # Wir "escapen" spitze Klammern, damit kein falsches HTML entsteht.
             safe_logs = logs.replace("<", "&lt;").replace(">", "&gt;")
-            
             return f"""
 <details>
-<summary>📋 <b>Klicke hier, um die Server-Logs zu sehen ({lines} Zeilen)</b></summary>
+<summary>📋 <b>Server-Logs von {settings.ssh_host} ({lines} Zeilen)</b></summary>
 <br>
 <pre><code>
 {safe_logs}
@@ -103,6 +112,9 @@ async def get_server_logs(lines: int = 50) -> str:
 """
         else:
             return f"❌ Fehler beim Log-Abruf: {stderr.decode().strip()}"
+
+    except Exception as e:
+        return f"❌ Kritischer Fehler: {str(e)}"
 
     except Exception as e:
         return f"❌ Kritischer Fehler: {str(e)}"
