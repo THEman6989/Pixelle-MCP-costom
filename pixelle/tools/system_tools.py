@@ -1,45 +1,66 @@
 import asyncio
 import aiohttp
+import shutil
 from pixelle.mcp_core import mcp
 from pixelle.settings import settings
 
-# --- 🔧 KONFIGURATION (BITTE AN DEINEN SERVER ANPASSEN!) ---
-SSH_USER = "root"               # Dein Benutzername auf dem ComfyUI-Server
-SSH_HOST = "192.168.1.XX"       # Die IP deines Servers (muss erreichbar sein)
-PM2_APP_NAME = "ComfyUI"        # Der exakte Name aus 'pm2 list' auf dem Server
-
+# --- 🔧 KONFIGURATION (BITTE ANPASSEN!) ---
+SSH_USER = "amin"               # Ihr Ubuntu-Benutzername
+SSH_PASS = "IhrPasswortHier"    # <--- HIER DAS PASSWORT EINTRAGEN
+SSH_HOST = "192.168.178.49"     # Die IP Ihres Servers (aus dem Chatverlauf)
+PM2_APP_NAME = "ComfyUI"        # Name des Prozesses in PM2 (meist 'ComfyUI')
 # -----------------------------------------------------------
+
+def build_ssh_command(remote_command: str) -> list:
+    """
+    Erstellt den SSH-Befehl. Wenn ein Passwort gesetzt ist,
+    wird 'sshpass' verwendet, um das Passwort automatisch einzugeben.
+    """
+    # Basis-SSH-Befehl (ohne Passwort-Prompt, akzeptiert Host-Key automatisch)
+    base_ssh = [
+        "ssh",
+        "-o", "BatchMode=no",                   # BatchMode muss bei sshpass 'no' sein
+        "-o", "StrictHostKeyChecking=no",       # Verhindert "Are you sure..." Frage
+        "-o", "UserKnownHostsFile=/dev/null",   # Speichert keine Keys (vermeidet Müll)
+        f"{SSH_USER}@{SSH_HOST}",
+        remote_command
+    ]
+
+    # Wenn ein Passwort konfiguriert ist und sshpass installiert ist:
+    if SSH_PASS and shutil.which("sshpass"):
+        return ["sshpass", "-p", SSH_PASS] + base_ssh
+    else:
+        # Fallback: Versucht Key-Based Auth, wenn kein Passwort oder sshpass fehlt
+        return base_ssh
+
 
 @mcp.tool()
 async def restart_comfyui_server() -> str:
     """
     💀 TERMINATOR: Startet den ComfyUI Server via SSH/PM2 komplett neu.
-    Nutze dies NUR, wenn der Server hängt oder nicht mehr reagiert.
-    Dies entspricht dem Ziehen des Steckers (Hard Reset).
+    Nutzt das konfigurierte Passwort für den SSH-Zugriff.
     """
-    # Wir nutzen den nativen SSH-Client deines Laptops.
-    # BatchMode=yes verhindert, dass das Skript hängen bleibt, falls ein Passwort gefragt wird.
-    ssh_cmd = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        f"{SSH_USER}@{SSH_HOST}",
-        f"pm2 restart {PM2_APP_NAME}"
-    ]
+    # Befehl für den Server
+    remote_cmd = f"pm2 restart {PM2_APP_NAME}"
+    
+    # Befehl zusammenbauen (mit sshpass wenn nötig)
+    full_cmd = build_ssh_command(remote_cmd)
     
     try:
         # Prozess starten
         proc = await asyncio.create_subprocess_exec(
-            *ssh_cmd,
+            *full_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await proc.communicate()
         
         if proc.returncode == 0:
-            return f"✅ **Terminator erfolgreich:** Prozess '{PM2_APP_NAME}' wurde neu gestartet."
+            return f"✅ **Terminator erfolgreich:** Prozess '{PM2_APP_NAME}' auf {SSH_HOST} neu gestartet."
         else:
             error_msg = stderr.decode().strip()
-            return f"❌ **Fehler beim Neustart:**\nSSH meldet: {error_msg}\n(Stimmen User, IP und PM2-Name?)"
+            return (f"❌ **Fehler beim Neustart:**\nSSH meldet: {error_msg}\n"
+                    f"Tipp: Ist 'sshpass' installiert? (sudo apt install sshpass)")
     except Exception as e:
         return f"❌ Kritischer Fehler beim Ausführen: {str(e)}"
 
@@ -48,53 +69,48 @@ async def restart_comfyui_server() -> str:
 async def interrupt_current_generation() -> str:
     """
     🛑 NOTBREMSE: Stoppt die aktuelle Generierung sanft über die API.
-    Der Server bleibt an, nur das aktuelle Bild wird abgebrochen.
-    Nutze dies, wenn du dich umentschieden hast.
+    (Benötigt kein SSH-Passwort, da es über HTTP läuft)
     """
-    # URL aus den Settings laden (die aus deiner .env Datei)
-    base_url = (settings.comfyui_base_url or "http://127.0.0.1:8188").rstrip('/')
+    base_url = (settings.comfyui_base_url or f"http://{SSH_HOST}:8188").rstrip('/')
     
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Interrupt senden (Stoppt die Rechnung)
+            # 1. Interrupt senden
             async with session.post(f"{base_url}/interrupt") as response:
                 if response.status == 200:
-                    # 2. Queue leeren (Damit nicht das nächste Bild direkt startet)
+                    # 2. Queue leeren
                     await session.post(f"{base_url}/queue", json={"clear": True})
                     return "🛑 **Abgebrochen:** Generierung gestoppt und Warteschlange geleert."
                 else:
-                    return f"⚠️ API-Fehler ({response.status}). Der Server reagiert komisch. Wenn er hängt, nutze 'restart_comfyui_server'."
+                    return f"⚠️ API-Fehler ({response.status}). Der Server reagiert komisch."
     except Exception as e:
-        return f"❌ Verbindung fehlgeschlagen. Der Server scheint tot zu sein. Nutze 'restart_comfyui_server'."
+        return f"❌ Verbindung zur API fehlgeschlagen ({base_url}). Nutze 'restart_comfyui_server'."
 
 
 @mcp.tool()
 async def get_server_logs(lines: int = 50) -> str:
     """
-    📋 DIAGNOSE: Holt die letzten Zeilen der Server-Logs via SSH.
+    📋 DIAGNOSE: Holt die letzten Zeilen der Server-Logs via SSH mit Passwort.
     """
-    log_cmd = f"tail -n {lines} ~/.pm2/logs/{PM2_APP_NAME}-out.log ~/.pm2/logs/{PM2_APP_NAME}-error.log"
+    # Log-Befehl für PM2
+    remote_cmd = f"tail -n {lines} ~/.pm2/logs/{PM2_APP_NAME}-out.log ~/.pm2/logs/{PM2_APP_NAME}-error.log"
     
-    ssh_cmd = [
-        "ssh", "-o", "BatchMode=yes",
-        f"{SSH_USER}@{SSH_HOST}", log_cmd
-    ]
+    full_cmd = build_ssh_command(remote_cmd)
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            *ssh_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *full_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await proc.communicate()
 
         if proc.returncode == 0:
             logs = stdout.decode().strip()
-            # Hier ist der Trick für Open WebUI: HTML Details Tags!
-            # Wir "escapen" spitze Klammern, damit kein falsches HTML entsteht.
+            # HTML-Safe machen für WebUI
             safe_logs = logs.replace("<", "&lt;").replace(">", "&gt;")
             
             return f"""
 <details>
-<summary>📋 <b>Klicke hier, um die Server-Logs zu sehen ({lines} Zeilen)</b></summary>
+<summary>📋 <b>Server-Logs von {SSH_HOST} ({lines} Zeilen)</b></summary>
 <br>
 <pre><code>
 {safe_logs}
