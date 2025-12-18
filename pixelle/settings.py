@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     chainlit_auth_secret: str = "changeme-generate-a-secure-secret-key"
     chainlit_auth_enabled: bool = True
     chainlit_save_starter_enabled: bool = False
+
+    # --- NEU: SSH Konfiguration ---
+    ssh_host: str = ""  # Standardwert (Fallback)
+    ssh_user: str = ""
+    ssh_password: str = ""            # Wird aus .env geladen
+    # ------------------------------
     
     # CDN configuration
     # Options: "auto" (detect by language), "china" (always use China CDN), "global" (always use global CDN)
