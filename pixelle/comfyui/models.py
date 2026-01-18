@@ -34,7 +34,7 @@ class ExecuteResult(BaseModel):
                     return f", {media_type}: {media_list}"
             
             # Process each type of media
-            for media_type in ["images", "audios", "videos", "texts"]:
+            for media_type in ["images", "audios", "videos"]:
                 media_list = getattr(self, media_type)
                 by_var_dict = getattr(self, f"{media_type}_by_var")
                 if media_list:
