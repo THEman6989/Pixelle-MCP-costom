@@ -275,11 +275,19 @@ class HttpExecutor(ComfyUIExecutor):
                         # Ergebnis abrufen, bevor wir es prüfen
                         result = await self._wait_for_results(prompt_id, client_id, timeout=1, output_id_2_var=output_id_2_var)
                         
-                        if result.status == "completed":
+                      if result.status == "completed":
                             # 1. Dateien übertragen
                             final_result = await self.transfer_result_files(result)
-                                                                            
-                            pass
+                            
+                            # 2. Logs holen und anhängen
+                            try:
+                                logs_html = self._get_formatted_logs(lines=30)
+                                if final_result.texts:
+                                    final_result.texts.append(logs_html)
+                                else:
+                                    final_result.texts = [logs_html]
+                            except Exception:
+                                pass
 
                             # 3. Fertig
                             return final_result
