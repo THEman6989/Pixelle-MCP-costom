@@ -272,10 +272,9 @@ class HttpExecutor(ComfyUIExecutor):
                     
                     # Prüfen: Ist er fertig?
                     try:
-                        # Ergebnis abrufen, bevor wir es prüfen
+                        # Ergebnis abrufen
                         result = await self._wait_for_results(prompt_id, client_id, timeout=1, output_id_2_var=output_id_2_var)
                         
-                        # KORREKTUR: Das 'if' muss exakt unter 'result =' stehen
                         if result.status == "completed":
                             # 1. Dateien übertragen
                             final_result = await self.transfer_result_files(result)
@@ -297,5 +296,5 @@ class HttpExecutor(ComfyUIExecutor):
                             return result # Echter Fehler, kein Retry
                             
                     except Exception:
-                        # Noch nicht fertig oder Timeout beim Check -> weitermachen
+                        # WICHTIG: Dieses 'except' muss exakt unter dem 'try' von oben stehen!
                         pass
