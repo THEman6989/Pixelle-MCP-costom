@@ -275,7 +275,8 @@ class HttpExecutor(ComfyUIExecutor):
                         # Ergebnis abrufen, bevor wir es prüfen
                         result = await self._wait_for_results(prompt_id, client_id, timeout=1, output_id_2_var=output_id_2_var)
                         
-                      if result.status == "completed":
+                        # KORREKTUR: Das 'if' muss exakt unter 'result =' stehen
+                        if result.status == "completed":
                             # 1. Dateien übertragen
                             final_result = await self.transfer_result_files(result)
                             
@@ -297,12 +298,4 @@ class HttpExecutor(ComfyUIExecutor):
                             
                     except Exception:
                         # Noch nicht fertig oder Timeout beim Check -> weitermachen
-                        pass 
-                    
-                    await asyncio.sleep(2)
-
-            except Exception as e:
-                logger.error(f"Fehler im Versuch {current_try}: {e}")
-                await asyncio.sleep(2)
-        
-        return ExecuteResult(status="error", msg="Max retries exceeded")
+                        pass
