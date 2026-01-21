@@ -258,7 +258,7 @@ class HttpExecutor(ComfyUIExecutor):
                 # 2. Warten mit intelligenter Überwachung
                 start_wait = time.time()
                 while True:
-                    # Timeout Schutz (hier Ihr erhöhter Wert)
+                    # Timeout Schutz (Ihr neuer Wert: 30 Stunden)
                     if time.time() - start_wait > 108000:
                         raise Exception("Global Timeout")
 
@@ -296,7 +296,12 @@ class HttpExecutor(ComfyUIExecutor):
                             return result # Echter Fehler, kein Retry
                             
                     except Exception:
-                        # WICHTIG: Dieses 'except' steht senkrecht genau unter dem 'try' von oben (20 Leerzeichen Einrückung)
                         pass 
                     
                     await asyncio.sleep(2)
+
+            except Exception as e:
+                logger.error(f"Fehler im Versuch {current_try}: {e}")
+                await asyncio.sleep(2)
+        
+        return ExecuteResult(status="error", msg="Max retries exceeded")
