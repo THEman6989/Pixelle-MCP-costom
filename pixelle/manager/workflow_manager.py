@@ -187,13 +187,23 @@ class WorkflowManager:
 
             title = metadata.title
             
+            # 1. NEU: Bereinige den Titel, damit er ein gültiger Python-Funktionsname wird.
+            # Ersetzt alle ungültigen Zeichen (wie Bindestriche oder Punkte) durch Unterstriche.
+            safe_title = re.sub(r'[^a-zA-Z0-9_]', '_', title)
             
-            # Verify title format
-            if not re.match(r'^[a-zA-Z0-9_\.-]+$', title):
-                logger.error(f"Tool name '{title}' format is invalid. Only letters, digits, underscores, dots, and hyphens are allowed.")
+            # 2. NEU: Python-Funktionen dürfen nicht mit einer Zahl beginnen.
+            if safe_title[0].isdigit():
+                safe_title = f"w_{safe_title}"
+                
+            # Wir weisen den bereinigten Namen wieder zu
+            title = safe_title
+            
+            # 3. Verify title format (Jetzt streng nach Python-Variablen-Regeln)
+            if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', title):
+                logger.error(f"Tool name '{title}' format is invalid. It must be a valid Python identifier.")
                 return {
                     "success": False,
-                    "error": f"Tool name '{title}' format is invalid. Only letters, digits, underscores, dots, and hyphens are allowed."
+                    "error": f"Tool name '{title}' format is invalid. It must be a valid Python identifier."
                 }
             
             # Generate parameter string
