@@ -59,31 +59,33 @@ class WorkflowManager:
     
     
     def _generate_params_str(self, params: Dict[str, Any]) -> str:
-        """Generate function parameter string"""
-        # Separate required parameters and optional parameters, ensure parameter order is correct
-        required_params = []
-        optional_params = []
+    required_params = []
+    optional_params = []
+    
+    # Mapping von ComfyUI/Workflow Typen zu Python Typen
+    type_map = {
+        "INT": "int", "FLOAT": "float", "BOOLEAN": "bool", 
+        "STRING": "str", "IMAGE": "str"
+    }
+    
+    for param_name, param in params.items():
+        description = param.description or ''
+        field_args = [f"description={repr(description)}"]
+        if param.default is not None:
+            field_args.append(f"default={repr(param.default)}")
+            
+        # Den Typen bereinigen/mappen (Standard-Fallback ist 'str')
+        raw_type = str(param.type).upper() if hasattr(param, 'type') else "STRING"
+        py_type = type_map.get(raw_type, "str")
         
-        for param_name, param in params.items():
-            # Directly use user-provided description
-            description = param.description or ''
-            
-            # Generate Field parameter list
-            field_args = [f"description={repr(description)}"]
-            if param.default is not None:
-                field_args.append(f"default={repr(param.default)}")
-            
-            # Generate complete parameter definition
-            param_str = f"{param_name}: {param.type} = Field({', '.join(field_args)})"
-            
-            # Classify parameters based on whether they have default values
-            if param.default is not None:
-                optional_params.append(param_str)
-            else:
-                required_params.append(param_str)
+        param_str = f"{param_name}: {py_type} = Field({', '.join(field_args)})"
         
-        # Required parameters first, optional parameters last
-        return ", ".join(required_params + optional_params)
+        if param.default is not None:
+            optional_params.append(param_str)
+        else:
+            required_params.append(param_str)
+            
+    return ", ".join(required_params + optional_params)
     
     def _generate_workflow_function(self, title: str, params_str: str) -> tuple[str, str]:
         """Generate the workflow execution function code
