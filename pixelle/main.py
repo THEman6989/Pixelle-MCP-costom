@@ -83,7 +83,11 @@ from pixelle.tools import i_crop
 from pixelle.tools import workflow_manager_tool
 
 # Register files router
-app.include_router(files_router, prefix="/files")
+
+# --- NEU: Job API für asynchrones Monitoring (Schritt 3) ---
+from pixelle.api.jobs_api import router as jobs_router
+app.include_router(jobs_router, prefix="/api")
+# -----------------------------------------------------------
 
 # Mount MCP server to `/pixelle` path
 app.mount("/pixelle", mcp_app)
